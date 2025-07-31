@@ -22,7 +22,9 @@ func main() {
 
 	mux := http.NewServeMux()
 
-	apiCfg := &apiConfig{fileserverHits: atomic.Int32{}, db: database.New(db)}
+	jwtSecret := os.Getenv("JWT_SECRET")
+
+	apiCfg := &apiConfig{fileserverHits: atomic.Int32{}, db: database.New(db), jwtSecret: jwtSecret}
 
 	mux.HandleFunc("GET /admin/metrics", apiCfg.metrics)
 	mux.HandleFunc("POST /admin/reset", apiCfg.reset)
@@ -34,6 +36,9 @@ func main() {
 	mux.HandleFunc("GET /api/chirps", apiCfg.getAllChirps)
 	mux.HandleFunc("POST /api/chirps", apiCfg.chirps)
 	mux.HandleFunc("POST /api/users", apiCfg.createUser)
+	mux.HandleFunc("POST /api/login", apiCfg.login)
+	mux.HandleFunc("POST /api/refresh", apiCfg.handlerRefresh)
+	mux.HandleFunc("POST /api/revoke", apiCfg.handlerRevoke)
 
 	port := "8080"
 	server := &http.Server{

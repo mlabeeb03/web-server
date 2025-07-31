@@ -6,9 +6,11 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/google/uuid"
+	"github.com/mlabeeb03/web-server/internal/auth"
 	"github.com/mlabeeb03/web-server/internal/database"
 )
 
@@ -31,7 +33,8 @@ func (config *apiConfig) metrics(w http.ResponseWriter, r *http.Request) {
 
 func (config *apiConfig) createUser(w http.ResponseWriter, r *http.Request) {
 	type parameter struct {
-		Email string `json:"email"`
+		Email    string `json:"email"`
+		Password string `json:"password"`
 	}
 	decoder := json.NewDecoder(r.Body)
 	params := parameter{}
@@ -40,7 +43,15 @@ func (config *apiConfig) createUser(w http.ResponseWriter, r *http.Request) {
 		respondWithError(w, http.StatusInternalServerError, "Couldn't decode parameters", err)
 		return
 	}
-	dbUser, err := config.db.CreateUser(r.Context(), params.Email)
+	hashedPassword, err := auth.HashPassword(params.Password)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Couldn't hash password", err)
+		return
+	}
+	dbUser, err := config.db.CreateUser(r.Context(), database.CreateUserParams{
+		Email:          params.Email,
+		HashedPassword: hashedPassword,
+	})
 	if err != nil {
 		respondWithError(w, http.StatusInternalServerError, "Couldn't create user", err)
 		return
@@ -52,6 +63,63 @@ func (config *apiConfig) createUser(w http.ResponseWriter, r *http.Request) {
 		Email:     dbUser.Email,
 	}
 	respondWithJSON(w, http.StatusCreated, user)
+}
+
+func (config *apiConfig) login(w http.ResponseWriter, r *http.Request) {
+	type parameter struct {
+		Email    string `json:"email"`
+		Password string `json:"password"`
+	}
+	type AuthResponse struct {
+		User         User   `json:"user"`
+		Token        string `json:"token"`
+		RefreshToken string `json:"refresh_token"`
+	}
+	decoder := json.NewDecoder(r.Body)
+	params := parameter{}
+	err := decoder.Decode(&params)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Couldn't decode parameters", err)
+		return
+	}
+	dbUser, err := config.db.GetUser(r.Context(), params.Email)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Couldn't find user", err)
+		return
+	}
+	if auth.CheckPasswordHash(params.Password, dbUser.HashedPassword) != nil {
+		respondWithError(w, http.StatusUnauthorized, "Incorrect email or password", err)
+		return
+	}
+	token, err := auth.MakeJWT(dbUser.ID, config.jwtSecret, time.Hour)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Could not create JWT", err)
+		return
+	}
+	refreshTokenString, err := auth.MakeRefreshToken()
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Could not create refresh token", err)
+		return
+	}
+	refreshToken, err := config.db.CreateRefreshToken(r.Context(), database.CreateRefreshTokenParams{
+		Token:  refreshTokenString,
+		UserID: dbUser.ID,
+	})
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Could not create refresh token", err)
+		return
+	}
+	user := User{
+		ID:        dbUser.ID,
+		CreatedAt: dbUser.CreatedAt,
+		UpdatedAt: dbUser.UpdatedAt,
+		Email:     dbUser.Email,
+	}
+	respondWithJSON(w, http.StatusOK, AuthResponse{
+		User:         user,
+		Token:        token,
+		RefreshToken: refreshToken.Token,
+	})
 }
 
 func (config *apiConfig) reset(w http.ResponseWriter, r *http.Request) {
@@ -66,13 +134,23 @@ func (config *apiConfig) reset(w http.ResponseWriter, r *http.Request) {
 
 func (config *apiConfig) chirps(w http.ResponseWriter, r *http.Request) {
 	type parameters struct {
-		Body   string    `json:"body"`
-		UserID uuid.UUID `json:"user_id"`
+		Body string `json:"body"`
+	}
+	token, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		respondWithError(w, http.StatusUnauthorized, "User is not authorized", nil)
+		return
+	}
+	UserID, err := auth.ValidateJWT(token, config.jwtSecret)
+	fmt.Println(err)
+	if err != nil {
+		respondWithError(w, http.StatusUnauthorized, "User is not authorized", nil)
+		return
 	}
 	const maxChirpLen int = 140
 	decoder := json.NewDecoder(r.Body)
 	params := parameters{}
-	err := decoder.Decode(&params)
+	err = decoder.Decode(&params)
 	if err != nil {
 		respondWithError(w, http.StatusInternalServerError, "Couldn't decode parameters", err)
 	} else if utf8.RuneCountInString(params.Body) > maxChirpLen {
@@ -94,7 +172,7 @@ func (config *apiConfig) chirps(w http.ResponseWriter, r *http.Request) {
 		params.Body = output
 		dbChirp, err := config.db.CreateChirp(r.Context(), database.CreateChirpParams{
 			Body:   params.Body,
-			UserID: params.UserID,
+			UserID: UserID,
 		})
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, "Couldn't create chirp", err)
@@ -149,4 +227,52 @@ func (config *apiConfig) getAllChirps(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 	respondWithJSON(w, http.StatusOK, chirps)
+}
+
+func (cfg *apiConfig) handlerRefresh(w http.ResponseWriter, r *http.Request) {
+	type response struct {
+		Token string `json:"token"`
+	}
+
+	refreshToken, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		respondWithError(w, http.StatusBadRequest, "Couldn't find token", err)
+		return
+	}
+
+	user, err := cfg.db.GetUserFromRefreshToken(r.Context(), refreshToken)
+	if err != nil {
+		respondWithError(w, http.StatusUnauthorized, "Couldn't get user for refresh token", err)
+		return
+	}
+
+	accessToken, err := auth.MakeJWT(
+		user.ID,
+		cfg.jwtSecret,
+		time.Hour,
+	)
+	if err != nil {
+		respondWithError(w, http.StatusUnauthorized, "Couldn't validate token", err)
+		return
+	}
+
+	respondWithJSON(w, http.StatusOK, response{
+		Token: accessToken,
+	})
+}
+
+func (cfg *apiConfig) handlerRevoke(w http.ResponseWriter, r *http.Request) {
+	refreshToken, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		respondWithError(w, http.StatusBadRequest, "Couldn't find token", err)
+		return
+	}
+
+	_, err = cfg.db.RevokeRefreshToken(r.Context(), refreshToken)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Couldn't revoke session", err)
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
 }

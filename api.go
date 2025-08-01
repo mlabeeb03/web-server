@@ -56,13 +56,13 @@ func (config *apiConfig) createUser(w http.ResponseWriter, r *http.Request) {
 		respondWithError(w, http.StatusInternalServerError, "Couldn't create user", err)
 		return
 	}
-	user := User{
-		ID:        dbUser.ID,
-		CreatedAt: dbUser.CreatedAt,
-		UpdatedAt: dbUser.UpdatedAt,
-		Email:     dbUser.Email,
-	}
-	respondWithJSON(w, http.StatusCreated, user)
+	respondWithJSON(w, http.StatusCreated, User{
+		ID:          dbUser.ID,
+		CreatedAt:   dbUser.CreatedAt,
+		UpdatedAt:   dbUser.UpdatedAt,
+		Email:       dbUser.Email,
+		IsChirpyRed: dbUser.IsChirpyRed,
+	})
 }
 
 func (config *apiConfig) modifyUser(w http.ResponseWriter, r *http.Request) {
@@ -102,10 +102,11 @@ func (config *apiConfig) modifyUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	respondWithJSON(w, http.StatusOK, User{
-		ID:        dbUser.ID,
-		CreatedAt: dbUser.CreatedAt,
-		UpdatedAt: dbUser.UpdatedAt,
-		Email:     dbUser.Email,
+		ID:          dbUser.ID,
+		CreatedAt:   dbUser.CreatedAt,
+		UpdatedAt:   dbUser.UpdatedAt,
+		Email:       dbUser.Email,
+		IsChirpyRed: dbUser.IsChirpyRed,
 	})
 }
 
@@ -115,7 +116,7 @@ func (config *apiConfig) login(w http.ResponseWriter, r *http.Request) {
 		Password string `json:"password"`
 	}
 	type AuthResponse struct {
-		User         User   `json:"user"`
+		User
 		Token        string `json:"token"`
 		RefreshToken string `json:"refresh_token"`
 	}
@@ -153,14 +154,14 @@ func (config *apiConfig) login(w http.ResponseWriter, r *http.Request) {
 		respondWithError(w, http.StatusInternalServerError, "Could not create refresh token", err)
 		return
 	}
-	user := User{
-		ID:        dbUser.ID,
-		CreatedAt: dbUser.CreatedAt,
-		UpdatedAt: dbUser.UpdatedAt,
-		Email:     dbUser.Email,
-	}
 	respondWithJSON(w, http.StatusOK, AuthResponse{
-		User:         user,
+		User: User{
+			ID:          dbUser.ID,
+			CreatedAt:   dbUser.CreatedAt,
+			UpdatedAt:   dbUser.UpdatedAt,
+			Email:       dbUser.Email,
+			IsChirpyRed: dbUser.IsChirpyRed,
+		},
 		Token:        token,
 		RefreshToken: refreshToken.Token,
 	})
@@ -351,4 +352,44 @@ func (cfg *apiConfig) handlerRevoke(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (cfg *apiConfig) handlerUserUpgrade(w http.ResponseWriter, r *http.Request) {
+	type parameters struct {
+		Event string `json:"event"`
+		Data  struct {
+			UserId string `json:"user_id"`
+		} `json:"data"`
+	}
+	apiKey, err := auth.GetAPIKey(r.Header)
+	if err != nil {
+		respondWithError(w, http.StatusUnauthorized, "Not authorized", err)
+		return
+	}
+	if apiKey != cfg.polkaKey {
+		respondWithError(w, http.StatusUnauthorized, "Not authorized", err)
+		return
+	}
+	params := parameters{}
+	decoder := json.NewDecoder(r.Body)
+	err = decoder.Decode(&params)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Couldn't decode parameters", err)
+		return
+	}
+	if params.Event != "user.upgraded" {
+		respondWithJSON(w, http.StatusNoContent, nil)
+	} else {
+		uuid, err := uuid.Parse(params.Data.UserId)
+		if err != nil {
+			respondWithError(w, http.StatusBadRequest, "Invalid UUID", err)
+			return
+		}
+		_, err = cfg.db.MakeChirpyRed(r.Context(), uuid)
+		if err != nil {
+			respondWithError(w, http.StatusNotFound, "User not found", err)
+			return
+		}
+		respondWithJSON(w, http.StatusNoContent, nil)
+	}
 }

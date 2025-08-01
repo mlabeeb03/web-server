@@ -23,8 +23,9 @@ func main() {
 	mux := http.NewServeMux()
 
 	jwtSecret := os.Getenv("JWT_SECRET")
+	polkaKey := os.Getenv("POLKA_KEY")
 
-	apiCfg := &apiConfig{fileserverHits: atomic.Int32{}, db: database.New(db), jwtSecret: jwtSecret}
+	apiCfg := &apiConfig{fileserverHits: atomic.Int32{}, db: database.New(db), jwtSecret: jwtSecret, polkaKey: polkaKey}
 
 	mux.HandleFunc("GET /admin/metrics", apiCfg.metrics)
 	mux.HandleFunc("POST /admin/reset", apiCfg.reset)
@@ -41,6 +42,7 @@ func main() {
 	mux.HandleFunc("POST /api/login", apiCfg.login)
 	mux.HandleFunc("POST /api/refresh", apiCfg.handlerRefresh)
 	mux.HandleFunc("POST /api/revoke", apiCfg.handlerRevoke)
+	mux.HandleFunc("POST /api/polka/webhooks", apiCfg.handlerUserUpgrade)
 
 	port := "8080"
 	server := &http.Server{

@@ -65,6 +65,50 @@ func (config *apiConfig) createUser(w http.ResponseWriter, r *http.Request) {
 	respondWithJSON(w, http.StatusCreated, user)
 }
 
+func (config *apiConfig) modifyUser(w http.ResponseWriter, r *http.Request) {
+	type parameter struct {
+		Email    string `json:"email"`
+		Password string `json:"password"`
+	}
+	decoder := json.NewDecoder(r.Body)
+	params := parameter{}
+	err := decoder.Decode(&params)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Couldn't decode parameters", err)
+		return
+	}
+	hashedPassword, err := auth.HashPassword(params.Password)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Couldn't hash password", err)
+		return
+	}
+	token, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		respondWithError(w, http.StatusUnauthorized, "User is not authorized", nil)
+		return
+	}
+	UserID, err := auth.ValidateJWT(token, config.jwtSecret)
+	if err != nil {
+		respondWithError(w, http.StatusUnauthorized, "User is not authorized", nil)
+		return
+	}
+	dbUser, err := config.db.UpdateUser(r.Context(), database.UpdateUserParams{
+		Email:          params.Email,
+		HashedPassword: hashedPassword,
+		ID:             UserID,
+	})
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Couldn't update user", err)
+		return
+	}
+	respondWithJSON(w, http.StatusOK, User{
+		ID:        dbUser.ID,
+		CreatedAt: dbUser.CreatedAt,
+		UpdatedAt: dbUser.UpdatedAt,
+		Email:     dbUser.Email,
+	})
+}
+
 func (config *apiConfig) login(w http.ResponseWriter, r *http.Request) {
 	type parameter struct {
 		Email    string `json:"email"`
@@ -142,7 +186,6 @@ func (config *apiConfig) chirps(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	UserID, err := auth.ValidateJWT(token, config.jwtSecret)
-	fmt.Println(err)
 	if err != nil {
 		respondWithError(w, http.StatusUnauthorized, "User is not authorized", nil)
 		return
@@ -208,6 +251,39 @@ func (config *apiConfig) getChirp(w http.ResponseWriter, r *http.Request) {
 		UserID:    dbChirp.UserID,
 	}
 	respondWithJSON(w, http.StatusOK, chirp)
+}
+
+func (config *apiConfig) deleteChirp(w http.ResponseWriter, r *http.Request) {
+	uuid, err := uuid.Parse(r.PathValue("chirpID"))
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Couldn't parse uuid", err)
+		return
+	}
+	token, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		respondWithError(w, http.StatusUnauthorized, "User is not authorized", nil)
+		return
+	}
+	UserID, err := auth.ValidateJWT(token, config.jwtSecret)
+	if err != nil {
+		respondWithError(w, http.StatusUnauthorized, "User is not authorized", nil)
+		return
+	}
+	chirp, err := config.db.GetChirp(r.Context(), uuid)
+	if err != nil {
+		respondWithError(w, http.StatusBadRequest, "Chirp not found", nil)
+		return
+	}
+	if UserID != chirp.UserID {
+		respondWithError(w, http.StatusForbidden, "User is not authorized", err)
+		return
+	}
+	err = config.db.DeleteChirp(r.Context(), uuid)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Could not delete chirp", err)
+		return
+	}
+	respondWithJSON(w, http.StatusNoContent, nil)
 }
 
 func (config *apiConfig) getAllChirps(w http.ResponseWriter, r *http.Request) {

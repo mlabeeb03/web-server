@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"sort"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -288,10 +289,26 @@ func (config *apiConfig) deleteChirp(w http.ResponseWriter, r *http.Request) {
 }
 
 func (config *apiConfig) getAllChirps(w http.ResponseWriter, r *http.Request) {
-	dbChirps, err := config.db.GetAllChirps(r.Context())
+	authorId := r.URL.Query().Get("author_id")
+	sortType := r.URL.Query().Get("sort")
+	var dbChirps []database.Chirp
+	var err error
+	if authorId == "" {
+		dbChirps, err = config.db.GetAllChirps(r.Context())
+	} else {
+		uuid, err := uuid.Parse(authorId)
+		if err != nil {
+			respondWithError(w, http.StatusBadRequest, "Invalid UUID", err)
+			return
+		}
+		dbChirps, err = config.db.GetAllAuthorChirps(r.Context(), uuid)
+	}
 	if err != nil {
 		respondWithError(w, http.StatusInternalServerError, "Couldn't fetch chirps", err)
 		return
+	}
+	if sortType == "desc" {
+		sort.Slice(dbChirps, func(i, j int) bool { return dbChirps[i].CreatedAt.After(dbChirps[j].CreatedAt) })
 	}
 	chirps := []Chirp{}
 	for _, chirp := range dbChirps {
